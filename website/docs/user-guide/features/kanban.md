@@ -856,12 +856,18 @@ API routes begin 500'ing), use this sequence:
 # Default board path (single-board installs)
 DB="${HERMES_HOME:-$HOME/.hermes}/kanban.db"
 
-# Multi-board path example (replace <slug>)
+# Multi-board installs: discover board slugs, then replace <slug> below.
+ls "${HERMES_HOME:-$HOME/.hermes}/kanban/boards/"
 # DB="${HERMES_HOME:-$HOME/.hermes}/kanban/boards/<slug>/kanban.db"
 
-cp -a "$DB" "$DB.pre-recover.$(date +%Y%m%d_%H%M%S).bak"
-[ -f "$DB-wal" ] && cp -a "$DB-wal" "$DB-wal.pre-recover.bak"
-[ -f "$DB-shm" ] && cp -a "$DB-shm" "$DB-shm.pre-recover.bak"
+# If SQLite can still open the DB, checkpoint committed WAL content into the
+# main file before .recover reads raw pages. This may fail on severe corruption.
+sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+
+TS=$(date +%Y%m%d_%H%M%S)
+cp -p "$DB" "$DB.pre-recover.$TS.bak"
+[ -f "$DB-wal" ] && cp -p "$DB-wal" "$DB-wal.pre-recover.$TS.bak"
+[ -f "$DB-shm" ] && cp -p "$DB-shm" "$DB-shm.pre-recover.$TS.bak"
 
 sqlite3 "$DB" ".recover" > "$DB.recover.sql"
 # Some SQLite versions emit a sqlite_sequence CREATE statement during .recover;
@@ -872,6 +878,9 @@ sqlite3 "$DB.recovered" < "$DB.recover.sql" || \
 sqlite3 "$DB.recovered" "PRAGMA quick_check; PRAGMA integrity_check;"
 mv "$DB.recovered" "$DB"
 ```
+
+`cp -p` preserves file metadata for these single-file backups and works across
+Linux and macOS without relying on GNU-specific archive semantics.
 
 After replacing the DB, run a bounded dispatcher pass to clean up stale in-flight
 rows and promote newly-unblocked work:
@@ -885,7 +894,9 @@ If specific tasks still show `running` with no live worker, reclaim them
 explicitly:
 
 ```bash
-hermes kanban reclaim <task_id> --reason "post-recover stale running cleanup"
+hermes kanban show <task_id>
+hermes kanban reclaim <task_id> \
+  --reason "post-recover stale running cleanup"
 ```
 
 Then restart gateway/dispatcher and confirm board health from either surface:
