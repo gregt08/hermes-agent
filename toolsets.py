@@ -407,6 +407,88 @@ TOOLSETS = {
         "includes": []
     },
 
+    # --- Opt-in root/runtime tool modes ---
+    # Safe, bounded toolsets that reduce static-context pressure by excluding
+    # heavy tools. hermes-cli remains the default/fallback. Users can opt in
+    # via config.yaml platform_toolsets / existing toolset selection paths.
+    # Token savings are meaningful vs hermes-cli (verified via
+    # scripts/measure_static_context.py).
+
+    "hermes-root-ops-core": {
+        "description": (
+            "Minimal ops core — file, terminal, skills, todo, session_search, clarify, messaging. "
+            "Excludes browser, cron, delegation, vision, code_execution, and kanban to reduce "
+            "static-context cost. Use for shell-heavy operations and config management."
+        ),
+        "tools": [
+            "read_file", "write_file", "patch", "search_files",
+            "terminal", "process",
+            "skills_list", "skill_view", "skill_manage",
+            "todo",
+            "session_search",
+            "clarify",
+            "send_message",
+        ],
+        "includes": []
+    },
+
+    "hermes-root-chat-min": {
+        "description": (
+            "Minimal chat — skills, todo, session_search, clarify, messaging. "
+            "Excludes file, terminal, browser, web, cron, delegation, vision, kanban. "
+            "Lowest static context. Use for lightweight chat-only interactions."
+        ),
+        "tools": [
+            "skills_list", "skill_view", "skill_manage",
+            "todo",
+            "session_search",
+            "clarify",
+            "send_message",
+        ],
+        "includes": []
+    },
+
+    "hermes-root-research": {
+        "description": (
+            "Research mode — web, browser, skills, todo, session_search, clarify. "
+            "Excludes terminal, cron, delegation, kanban, code_execution. "
+            "Use for web exploration and analysis tasks."
+        ),
+        "tools": [
+            "web_search", "web_extract",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
+            "skills_list", "skill_view", "skill_manage",
+            "todo",
+            "session_search",
+            "clarify",
+        ],
+        "includes": []
+    },
+
+    "hermes-root-coding-coord": {
+        "description": (
+            "Coding coordinator — file, terminal, skills, todo, session_search, delegation, kanban. "
+            "Excludes browser, web, cron, vision, image_gen, and direct code_execution. "
+            "Use for code tasks that need delegation and Kanban coordination."
+        ),
+        "tools": [
+            "read_file", "write_file", "patch", "search_files",
+            "terminal", "process",
+            "skills_list", "skill_view", "skill_manage",
+            "todo",
+            "session_search",
+            "delegate_task",
+            "kanban_show", "kanban_list",
+            "kanban_complete", "kanban_block", "kanban_heartbeat",
+            "kanban_comment", "kanban_create", "kanban_link",
+            "kanban_unblock",
+        ],
+        "includes": []
+    },
+
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",
         "tools": _HERMES_CORE_TOOLS,

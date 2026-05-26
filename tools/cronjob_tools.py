@@ -684,23 +684,20 @@ def cronjob(
 
 CRONJOB_SCHEMA = {
     "name": "cronjob",
-    "description": """Manage scheduled cron jobs with a single compressed tool.
+    "description": """Manage scheduled cron jobs — create/list/update/pause/resume/remove/run.
 
-Use action='create' to schedule a new job from a prompt or one or more skills.
-Use action='list' to inspect jobs.
-Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
+action='create': schedule a job from a prompt or skills (skills load first, then prompt runs each tick).
+action='list': inspect jobs.
+action='update'/'pause'/'resume'/'remove'/'run': manage existing jobs. Always list first to find job_id.
 
-To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
+Jobs run in a fresh session with no current-chat context — prompts must be self-contained.
+If no_agent=True, the scheduler runs `script` verbatim each tick; stdout is delivered as the message
+(empty stdout = silent, non-zero exit = error alert).
 
-Jobs run in a fresh session with no current-chat context, so prompts must be self-contained.
-If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
-On update, passing skills=[] clears attached skills.
+NOTE: The agent's final response is auto-delivered to the target. Put primary user-facing content
+in the final response. Cron jobs run autonomously with no user present — cannot ask questions.
 
-NOTE: The agent's final response is auto-delivered to the target. Put the primary
-user-facing content in the final response. Cron jobs run autonomously with no user
-present — they cannot ask questions or request clarification.
-
-Important safety rule: cron-run sessions should not recursively schedule more cron jobs.""",
+Safety: cron-run sessions should not recursively schedule more cron jobs.""",
     "parameters": {
         "type": "object",
         "properties": {
@@ -730,7 +727,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "deliver": {
                 "type": "string",
-                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id for a specific destination. Combine with comma: 'origin,all' delivers to the origin plus every other connected channel. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567', 'all'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. 'all' resolves at fire time, so a job created before a channel was wired up will pick it up automatically once connected."
+                "description": "Delivery target for the cron job's final response. Omit for auto-delivery back to current chat/topic. 'origin' (same), 'local' (save only), 'all' (fan out to all connected home channels), or platform:chat_id:thread_id for a specific destination (e.g., 'telegram:-1001234567890:17585', 'discord:#engineering'). 'all' resolves at fire time so a job created before a channel was wired will auto-pick it up. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. Combine with comma: 'origin,all' delivers to origin plus all home channels."
             },
             "skills": {
                 "type": "array",
@@ -760,18 +757,13 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "boolean",
                 "default": False,
                 "description": (
-                    "Default: False (LLM-driven job — the agent runs the prompt each tick). "
-                    "Set True to skip the LLM entirely: the scheduler just runs ``script`` on schedule and delivers its stdout verbatim. No tokens, no agent loop, no model override honoured. "
-                    "\n\n"
-                    "REQUIREMENTS when True: ``script`` MUST be set (``prompt`` and ``skills`` are ignored). "
-                    "\n\n"
-                    "DELIVERY SEMANTICS when True: "
-                    "(a) non-empty stdout is sent verbatim as the message; "
-                    "(b) EMPTY stdout means SILENT — nothing is sent to the user and they won't see anything happened, so design your script to stay quiet when there's nothing to report (the watchdog pattern); "
-                    "(c) non-zero exit / timeout sends an error alert so a broken watchdog can't fail silently. "
-                    "\n\n"
-                    "WHEN TO USE True: recurring script-only pings where the script itself produces the exact message text (memory/disk/GPU watchdogs, threshold alerts, heartbeats, CI notifications, API pollers with a fixed output shape). "
-                    "WHEN TO USE False (default): anything that needs reasoning — summarize a feed, draft a daily briefing, pick interesting items, rephrase data for a human, follow conditional logic based on content."
+                    "Default: False (LLM-driven job). True = skip LLM; scheduler runs `script` verbatim each tick "
+                    "and delivers stdout as the message. Requires `script` to be set (prompt/skills ignored).\n"
+                    "  (a) non-empty stdout → verbatim message; "
+                    "(b) empty stdout → SILENT (nothing sent); "
+                    "(c) non-zero exit/timeout → error alert.\n"
+                    "Use True for script-only watchdogs (disk/GPU/heartbeat/CI notifications). "
+                    "Use False for anything needing reasoning (summaries, drafting, conditional logic)."
                 ),
             },
             "context_from": {
@@ -794,11 +786,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "workdir": {
                 "type": "string",
-                "description": "Optional absolute path to run the job from. When set, AGENTS.md / CLAUDE.md / .cursorrules from that directory are injected into the system prompt, and the terminal/file/code_exec tools use it as their working directory — useful for running a job inside a specific project repo. Must be an absolute path that exists. When unset (default), preserves the original behaviour: no project context files, tools use the scheduler's cwd. On update, pass an empty string to clear. Jobs with workdir run sequentially (not parallel) to keep per-job directories isolated."
+                "description": "Optional absolute path for job's working directory. When set, AGENTS.md/CLAUDE.md/.cursorrules from that dir are injected into the system prompt, and terminal/file/code_exec use it as cwd. Must exist. Unset = scheduler's cwd. Jobs with workdir run sequentially. On update, pass empty string to clear."
             },
             "profile": {
                 "type": "string",
-                "description": "Optional Hermes profile name to run the job under. When set, the scheduler resolves that profile, applies a context-local Hermes home override, loads that profile's config/.env for the run, and bridges HERMES_HOME into subprocesses. Any temporary process-environment changes from profile .env loading are restored after the job exits. Use 'default' for the root Hermes profile. Named profiles must already exist. When unset (default), preserves the scheduler's existing profile. On update, pass an empty string to clear. Jobs with profile run sequentially (not parallel) to keep profile-scoped runtime state isolated."
+                "description": "Optional Hermes profile name to run the job under. Resolves profile, applies context-local HERMES_HOME override, loads profile config/.env, bridges HERMES_HOME into subprocesses. 'default' = root Hermes profile. Named profiles must already exist. Unset = scheduler's existing profile. Jobs with profile run sequentially. On update, pass empty string to clear."
             },
         },
         "required": ["action"]
