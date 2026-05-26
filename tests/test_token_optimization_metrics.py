@@ -46,7 +46,7 @@ def test_truthy_gate_writes_profile_aware_jsonl(monkeypatch, tmp_path):
 
     raw_row = rows[0]
     row = json.loads(raw_row)
-    assert row["schema_version"] == 1
+    assert row["schema_version"] == 2
     assert row["event_type"] == "tool_result"
     assert row["session_id"] == "session-1"
     assert row["task_id"] == "task-1"
@@ -57,7 +57,9 @@ def test_truthy_gate_writes_profile_aware_jsonl(monkeypatch, tmp_path):
     assert row["is_json"] is True
     assert row["top_level_type"] == "object"
     assert row["has_error_key"] is False
+    assert row["has_non_empty_error"] is False
     assert row["truncated_by_tool"] is True
+    assert row["result_class"] == "truncated"
     assert "sha256" in row
 
     assert "SECRET_PAYLOAD" not in raw_row
@@ -83,6 +85,8 @@ def test_build_metric_records_shape_and_identifier_not_payload():
     assert row["estimated_tokens"] == estimate_tokens(len(result))
     assert row["top_level_type"] == "object"
     assert row["has_error_key"] is True
+    assert row["has_non_empty_error"] is True
+    assert row["result_class"] == "runtime_error"
     assert row["arg_keys"] == ["path"]
     assert len(row["sha256"]) == 64
     # sha256 is an identifier for equality/correlation, not anonymization.
@@ -104,7 +108,9 @@ def test_invalid_json_shape_is_metadata_only():
     assert row["is_json"] is False
     assert row["top_level_type"] == "invalid_json"
     assert row["has_error_key"] is False
+    assert row["has_non_empty_error"] is False
     assert row["truncated_by_tool"] is False
+    assert row["result_class"] == "invalid_json"
     assert row["arg_keys"] == []
     assert row["duration_ms"] is None
 
@@ -124,3 +130,19 @@ def test_metrics_fail_open(monkeypatch, tmp_path):
         tool_call_id=None,
         duration_ms=1,
     )
+
+
+def test_null_error_field_is_not_counted_as_actual_error():
+    row = build_tool_result_metric(
+        tool_name="terminal",
+        function_args={"command": "true"},
+        result='{"output":"ok","error":null}',
+        task_id="task-1",
+        session_id="session-1",
+        tool_call_id="call-1",
+        duration_ms=2,
+    )
+
+    assert row["has_error_key"] is True
+    assert row["has_non_empty_error"] is False
+    assert row["result_class"] == "success"

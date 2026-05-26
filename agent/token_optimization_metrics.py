@@ -45,46 +45,72 @@ def _json_shape(result: str) -> dict[str, Any]:
             "is_json": False,
             "top_level_type": "invalid_json",
             "has_error_key": False,
+            "has_non_empty_error": False,
             "truncated_by_tool": False,
+            "result_class": "invalid_json",
         }
 
     if isinstance(parsed, dict):
         top_level_type = "object"
         has_error_key = "error" in parsed
+        error_value = parsed.get("error")
+        has_non_empty_error = error_value not in (None, "", False)
         truncated_by_tool = any(
             parsed.get(key) is True
             for key in ("truncated_by_tool", "truncated", "is_truncated")
         )
+        if has_non_empty_error:
+            result_class = "runtime_error"
+        elif truncated_by_tool:
+            result_class = "truncated"
+        elif not parsed:
+            result_class = "empty"
+        else:
+            result_class = "success"
     elif isinstance(parsed, list):
         top_level_type = "array"
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "empty" if not parsed else "success"
     elif isinstance(parsed, str):
         top_level_type = "string"
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "empty" if not parsed else "success"
     elif isinstance(parsed, bool):
         top_level_type = "boolean"
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "success"
     elif isinstance(parsed, (int, float)):
         top_level_type = "number"
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "success"
     elif parsed is None:
         top_level_type = "null"
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "empty"
     else:
         top_level_type = type(parsed).__name__
         has_error_key = False
+        has_non_empty_error = False
         truncated_by_tool = False
+        result_class = "success"
 
     return {
         "is_json": True,
         "top_level_type": top_level_type,
         "has_error_key": has_error_key,
+        "has_non_empty_error": has_non_empty_error,
         "truncated_by_tool": truncated_by_tool,
+        "result_class": result_class,
     }
 
 
@@ -106,7 +132,7 @@ def build_tool_result_metric(
     result_bytes = result_text.encode("utf-8", errors="replace")
     char_count = len(result_text)
     metric: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "event_type": "tool_result",
         "created_at_ms": int(time.time() * 1000),
         "session_id": session_id or "",
