@@ -120,6 +120,28 @@ def test_browser_snapshot_tool_preserves_element_count(monkeypatch):
     assert "@e34" in result["snapshot"]
 
 
+def test_browser_snapshot_result_mode_full_uses_full_backend_snapshot(monkeypatch):
+    snapshot = _large_snapshot()
+    calls = []
+
+    def fake_run_browser_command(task_id, command, args=None, timeout=None):
+        calls.append((command, args))
+        return {
+            "success": True,
+            "data": {"snapshot": snapshot, "refs": {"e12": {}, "e34": {}}},
+        }
+
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+    monkeypatch.setattr(browser_tool, "_last_session_key", lambda task_id: task_id)
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run_browser_command)
+
+    result = json.loads(browser_tool.browser_snapshot(task_id="shape-test", result_mode="full"))
+
+    assert result["success"] is True
+    assert result["snapshot"] == snapshot
+    assert ("snapshot", []) in calls
+
+
 def test_browser_navigate_auto_snapshot_uses_result_mode(monkeypatch):
     snapshot = _large_snapshot()
     calls = []
