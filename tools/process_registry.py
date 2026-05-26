@@ -59,6 +59,16 @@ MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
 
+
+def _strip_ansi_and_redact_sensitive_text(text: str) -> str:
+    """Strip terminal control sequences and redact secrets from process output."""
+    from agent.redact import redact_sensitive_text
+    from tools.ansi_strip import strip_ansi
+
+    if text is None:
+        return ""
+    return redact_sensitive_text(strip_ansi(text), force=True)
+
 # Watch pattern rate limiting — PER SESSION.
 # Hard rule: at most ONE watch-match notification every WATCH_MIN_INTERVAL_SECONDS.
 # Any match arriving inside that cooldown window is dropped and counted as a strike.
@@ -858,8 +868,8 @@ class ProcessRegistry:
         # this guard, kill_process() and the reader thread can both call
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
         if was_running and session.notify_on_complete:
-            from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output = _strip_ansi_and_redact_sensitive_text(session.output_buffer) if session.output_buffer else ""
+            output_tail = output[-2000:]
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
@@ -974,7 +984,6 @@ class ProcessRegistry:
 
     def poll(self, session_id: str, result_mode: str = "auto") -> dict:
         """Check status and get new output for a background process."""
-        from tools.ansi_strip import strip_ansi
         from tools.result_shaping import compact_text_output
 
         session = self.get(session_id)
@@ -986,14 +995,15 @@ class ProcessRegistry:
         self._reconcile_local_exit(session)
 
         with session._lock:
-            output_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
+            output = _strip_ansi_and_redact_sensitive_text(session.output_buffer) if session.output_buffer else ""
+            output_preview = output[-1000:]
 
         shaped = compact_text_output(
             output_preview,
             result_mode=result_mode,
             field_name="output_preview",
             threshold_chars=20_000,
-            preview_chars=8_000,
+            preview_chars=800,
             hint=(
                 "Large process poll output compacted. Use result_mode='full' "
                 "for the exact poll preview window, or process(action='log', "
@@ -1008,7 +1018,7 @@ class ProcessRegistry:
             "status": "exited" if session.exited else "running",
             "pid": session.pid,
             "uptime_seconds": int(time.time() - session.started_at),
-            "output_preview": output_preview,
+            "output_preview": shaped.text,
         }
         result.update(shaped.metadata)
         if session.exited:
@@ -1022,7 +1032,6 @@ class ProcessRegistry:
     def read_log(self, session_id: str, offset: int = 0, limit: int = 200,
                  result_mode: str = "auto") -> dict:
         """Read the full output log with optional pagination by lines."""
-        from tools.ansi_strip import strip_ansi
         from tools.result_shaping import compact_text_output
 
         session = self.get(session_id)
@@ -1030,7 +1039,7 @@ class ProcessRegistry:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
+            full_output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
 
         lines = full_output.splitlines()
         total_lines = len(lines)
@@ -1080,7 +1089,6 @@ class ProcessRegistry:
             dict with status ("exited", "timeout", "interrupted", "not_found")
             and output snapshot.
         """
-        from tools.ansi_strip import strip_ansi
         from tools.interrupt import is_interrupted as _is_interrupted
         from tools.result_shaping import compact_text_output
 
@@ -1115,7 +1123,8 @@ class ProcessRegistry:
             self._reconcile_local_exit(session)
             if session.exited:
                 self._completion_consumed.add(session_id)
-                output_window = strip_ansi(session.output_buffer[-2000:])
+                output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+                output_window = output[-2000:]
                 shaped = compact_text_output(
                     output_window,
                     result_mode=result_mode,
@@ -1141,7 +1150,8 @@ class ProcessRegistry:
                 return result
 
             if _is_interrupted():
-                output_window = strip_ansi(session.output_buffer[-1000:])
+                output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+                output_window = output[-1000:]
                 shaped = compact_text_output(
                     output_window,
                     result_mode=result_mode,
@@ -1168,7 +1178,8 @@ class ProcessRegistry:
 
             time.sleep(1)
 
-        output_window = strip_ansi(session.output_buffer[-1000:])
+        output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+        output_window = output[-1000:]
         shaped = compact_text_output(
             output_window,
             result_mode=result_mode,
@@ -1569,7 +1580,7 @@ def format_process_notification(evt: dict) -> "str | None":
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _out = _strip_ansi_and_redact_sensitive_text(evt.get("output", ""))
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1583,7 +1594,7 @@ def format_process_notification(evt: dict) -> "str | None":
         return text
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = _strip_ansi_and_redact_sensitive_text(evt.get("output", ""))
     return (
         f"[IMPORTANT: Background process {_sid} completed "
         f"(exit code {_exit}).\n"
