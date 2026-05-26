@@ -112,7 +112,7 @@ class TestHandleFunctionCall:
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
 
-    def test_token_metrics_observe_dispatch_result_before_plugin_hooks(self, monkeypatch):
+    def test_token_metrics_observe_transformed_model_visible_result(self, monkeypatch):
         events = []
 
         def fake_metric(**kwargs):
@@ -139,12 +139,12 @@ class TestHandleFunctionCall:
         assert result == '{"rewritten":true}'
         assert [event[0] for event in events] == [
             "pre_tool_call",
-            "metric",
             "post_tool_call",
             "transform_tool_result",
+            "metric",
         ]
-        assert events[1][1] == '{"ok":true}'
-        assert isinstance(events[1][2], int)
+        assert events[-1][1] == '{"rewritten":true}'
+        assert isinstance(events[-1][2], int)
         assert events[1][2] == events[2][2] == events[3][2]
 
     def test_token_metrics_failure_does_not_change_tool_result(self, monkeypatch):

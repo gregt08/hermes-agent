@@ -848,19 +848,6 @@ def handle_function_call(
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
         try:
-            record_tool_result_metric(
-                tool_name=function_name,
-                function_args=function_args,
-                result=result,
-                task_id=task_id,
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                duration_ms=duration_ms,
-            )
-        except Exception as _metrics_err:
-            logger.debug("token optimization metric error: %s", _metrics_err)
-
-        try:
             from hermes_cli.plugins import invoke_hook
             invoke_hook(
                 "post_tool_call",
@@ -899,6 +886,19 @@ def handle_function_call(
                     break
         except Exception as _hook_err:
             logger.debug("transform_tool_result hook error: %s", _hook_err)
+
+        try:
+            record_tool_result_metric(
+                tool_name=function_name,
+                function_args=function_args,
+                result=result,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                duration_ms=duration_ms,
+            )
+        except Exception as _metrics_err:
+            logger.debug("token optimization metric error: %s", _metrics_err)
 
         return result
 
