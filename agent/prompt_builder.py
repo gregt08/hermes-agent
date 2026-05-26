@@ -830,6 +830,14 @@ _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_PROMPT_VERBOSE_VALUES = frozenset({
+    "1",
+    "true",
+    "yes",
+    "on",
+    "verbose",
+    "legacy",
+})
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -981,6 +989,107 @@ def _skill_should_show(
     return True
 
 
+def _skills_prompt_format() -> str:
+    """Return the skills prompt format selected for this process."""
+    verbose = (os.getenv("HERMES_SKILLS_PROMPT_VERBOSE") or "").strip().lower()
+    if verbose in _SKILLS_PROMPT_VERBOSE_VALUES:
+        return "verbose"
+    requested = (os.getenv("HERMES_SKILLS_PROMPT_FORMAT") or "").strip().lower()
+    if requested in _SKILLS_PROMPT_VERBOSE_VALUES:
+        return "verbose"
+    return "compact"
+
+
+def _iter_sorted_category_skills(
+    skills_by_category: dict[str, list[tuple[str, str]]],
+) -> "list[tuple[str, list[tuple[str, str]]]]":
+    """Return deterministic category/skill tuples with duplicates removed."""
+    categories: list[tuple[str, list[tuple[str, str]]]] = []
+    for category in sorted(skills_by_category.keys()):
+        seen: set[str] = set()
+        skills: list[tuple[str, str]] = []
+        for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+            if name in seen:
+                continue
+            seen.add(name)
+            skills.append((name, desc))
+        categories.append((category, skills))
+    return categories
+
+
+def _format_verbose_skills_prompt(
+    skills_by_category: dict[str, list[tuple[str, str]]],
+    category_descriptions: dict[str, str],
+) -> str:
+    """Legacy skills prompt format retained as a safe escape hatch."""
+    index_lines = []
+    for category, skills in _iter_sorted_category_skills(skills_by_category):
+        cat_desc = category_descriptions.get(category, "")
+        if cat_desc:
+            index_lines.append(f"  {category}: {cat_desc}")
+        else:
+            index_lines.append(f"  {category}:")
+        for name, desc in skills:
+            if desc:
+                index_lines.append(f"    - {name}: {desc}")
+            else:
+                index_lines.append(f"    - {name}")
+
+    return (
+        "## Skills (mandatory)\n"
+        "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+        "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+        "Err on the side of loading — it is always better to have context you don't need "
+        "than to miss critical steps, pitfalls, or established workflows. "
+        "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+        "and proven workflows that outperform general-purpose approaches. Load the skill "
+        "even if you think you could handle the task with basic tools like web_search or terminal. "
+        "Skills also encode the user's preferred approach, conventions, and quality standards "
+        "for tasks like code review, planning, and testing — load them even for tasks you "
+        "already know how to do, because the skill defines how it should be done here.\n"
+        "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
+        "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
+        "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
+        "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
+        "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+        "If a skill has issues, fix it with skill_manage(action='patch').\n"
+        "After difficult/iterative tasks, offer to save as a skill. "
+        "If a skill you loaded was missing steps, had wrong commands, or needed "
+        "pitfalls you discovered, update it before finishing.\n"
+        "\n"
+        "<available_skills>\n"
+        + "\n".join(index_lines) + "\n"
+        "</available_skills>\n"
+        "\n"
+        "Only proceed without loading a skill if genuinely none are relevant to the task."
+    )
+
+
+def _format_compact_skills_prompt(
+    skills_by_category: dict[str, list[tuple[str, str]]],
+    category_descriptions: dict[str, str],
+) -> str:
+    """Compact default skills prompt; preserves every visible skill name."""
+    index_lines = []
+    for category, skills in _iter_sorted_category_skills(skills_by_category):
+        names = ", ".join(name for name, _desc in skills)
+        index_lines.append(f"  {category}: {names}")
+
+    return (
+        "## Skills (mandatory)\n"
+        "Scan <available_skills> before replying. If any skill is relevant or partly relevant, "
+        "MUST load it with skill_view(name) and follow it before acting. Only skip skill_view "
+        "when genuinely none apply. For Hermes Agent setup/config/models/providers/tools/"
+        "skills/gateway/plugins/troubleshooting, load `hermes-agent` first. If a loaded skill "
+        "is stale or wrong, patch it with skill_manage(action='patch'); after difficult or "
+        "iterative work, offer to save the workflow as a skill.\n"
+        "\n"
+        "<available_skills>\n"
+        + "\n".join(index_lines) + "\n"
+        "</available_skills>"
+    )
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1015,6 +1124,7 @@ def build_skills_system_prompt(
         or ""
     )
     disabled = get_disabled_skill_names()
+    prompt_format = _skills_prompt_format()
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
@@ -1022,6 +1132,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        prompt_format,
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1158,52 +1269,10 @@ def build_skills_system_prompt(
     if not skills_by_category:
         result = ""
     else:
-        index_lines = []
-        for category in sorted(skills_by_category.keys()):
-            cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
-            seen = set()
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
-                    continue
-                seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
-
-        result = (
-            "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
-            "\n"
-            "<available_skills>\n"
-            + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
-            "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
-        )
+        if prompt_format == "verbose":
+            result = _format_verbose_skills_prompt(skills_by_category, category_descriptions)
+        else:
+            result = _format_compact_skills_prompt(skills_by_category, category_descriptions)
 
     # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:

@@ -263,8 +263,111 @@ class TestBuildSkillsSystemPrompt:
         )
         result = build_skills_system_prompt()
         assert "python-debug" in result
-        assert "Debug Python scripts" in result
+        assert "Debug Python scripts" not in result
         assert "available_skills" in result
+
+    def test_default_compact_prompt_is_smaller_than_verbose(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_names = [
+            "hermes-token-optimization",
+            "hermes-agent",
+            "multi-profile-coding-pipeline",
+            "github-pr-workflow",
+            "obsidian",
+        ]
+        for idx, name in enumerate(skill_names):
+            skill_dir = tmp_path / "skills" / "system" / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Skill description {idx}\n---\n"
+            )
+
+        compact = build_skills_system_prompt()
+
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache()
+        monkeypatch.setenv("HERMES_SKILLS_PROMPT_FORMAT", "verbose")
+        verbose = build_skills_system_prompt()
+
+        assert len(compact) <= len(verbose) * 0.7
+        assert "MUST load it with skill_view(name)" in compact
+        assert "available_skills" in compact
+        for name in skill_names:
+            assert name in compact
+
+    def test_default_compact_prompt_reduces_representative_skill_set(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_names = [
+            "hermes-token-optimization",
+            "hermes-agent",
+            "multi-profile-coding-pipeline",
+            "github-pr-workflow",
+            "obsidian",
+        ]
+        for idx in range(200):
+            name = skill_names[idx] if idx < len(skill_names) else f"skill-{idx:03d}"
+            category = f"category-{idx % 12:02d}"
+            skill_dir = tmp_path / "skills" / category / name
+            skill_dir.mkdir(parents=True)
+            description = (
+                f"Representative skill description {idx} with enough prose to "
+                "exercise the installed all-skills prompt size behavior."
+            )
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {description}\n---\n"
+            )
+
+        compact = build_skills_system_prompt()
+
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache()
+        monkeypatch.setenv("HERMES_SKILLS_PROMPT_FORMAT", "verbose")
+        verbose = build_skills_system_prompt()
+
+        assert len(compact) <= len(verbose) * 0.7
+        assert "MUST load it with skill_view(name)" in compact
+        assert "available_skills" in compact
+        assert "Representative skill description" not in compact
+        for name in skill_names:
+            assert name in compact
+
+    def test_verbose_skills_prompt_escape_hatch(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_SKILLS_PROMPT_VERBOSE", "1")
+        skills_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "Before replying, scan the skills below" in result
+        assert "    - python-debug: Debug Python scripts" in result
+
+    def test_compact_prompt_order_is_deterministic(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for category, name in [
+            ("zeta", "z-skill"),
+            ("alpha", "b-skill"),
+            ("alpha", "a-skill"),
+        ]:
+            skill_dir = tmp_path / "skills" / category / name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {name} description\n---\n"
+            )
+
+        result = build_skills_system_prompt()
+
+        alpha_pos = result.index("  alpha:")
+        zeta_pos = result.index("  zeta:")
+        a_pos = result.index("a-skill")
+        b_pos = result.index("b-skill")
+        assert alpha_pos < zeta_pos
+        assert a_pos < b_pos
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -275,7 +378,7 @@ class TestBuildSkillsSystemPrompt:
             (d / "SKILL.md").write_text("---\ndescription: Search stuff\n---\n")
         result = build_skills_system_prompt()
         # "search" should appear only once per category
-        assert result.count("- search") == 1
+        assert result.count("search") == 1
 
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
@@ -323,7 +426,7 @@ class TestBuildSkillsSystemPrompt:
             result = build_skills_system_prompt()
 
         assert "imessage" in result
-        assert "Send iMessages" in result
+        assert "Send iMessages" not in result
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""
@@ -1192,6 +1295,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-
-
