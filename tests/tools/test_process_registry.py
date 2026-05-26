@@ -102,8 +102,9 @@ class TestGetAndPoll:
         assert result["status"] == "exited"
         assert result["exit_code"] == 0
 
-    def test_poll_large_output_compacted_preserves_metadata(self, registry):
-        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+    def test_poll_large_output_uses_recent_preview_window(self, registry):
+        secret = "OPENAI_API_KEY=sk-proj-earlysecret1234567890abcdef"
+        output = f"HEAD {secret}\n" + ("A" * 30000) + "\nTAIL"
         s = _make_session(output=output)
         registry._running[s.id] = s
 
@@ -112,11 +113,11 @@ class TestGetAndPoll:
         assert result["status"] == "running"
         assert result["session_id"] == s.id
         assert result["command"] == "echo hello"
-        assert "HEAD" in result["output_preview"]
+        assert "HEAD" not in result["output_preview"]
+        assert secret not in result["output_preview"]
         assert "TAIL" in result["output_preview"]
-        assert "[OUTPUT_PREVIEW COMPACTED" in result["output_preview"]
-        assert result["compacted"] is True
-        assert result["output_preview_omitted_chars"] > 0
+        assert "[OUTPUT_PREVIEW COMPACTED" not in result["output_preview"]
+        assert "compacted" not in result
 
     def test_poll_result_mode_full_keeps_exact_preview_window(self, registry):
         output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
@@ -159,8 +160,9 @@ class TestProcessResultShaping:
         assert preview_result["output"] == output
         assert "compacted" not in preview_result
 
-    def test_wait_large_exited_output_compacted_preserves_exit_code(self, registry):
-        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+    def test_wait_large_exited_output_uses_recent_window(self, registry):
+        secret = "OPENAI_API_KEY=sk-proj-earlysecret1234567890abcdef"
+        output = f"HEAD {secret}\n" + ("A" * 30000) + "\nTAIL"
         s = _make_session(exited=True, exit_code=7, output=output)
         registry._finished[s.id] = s
 
@@ -168,10 +170,11 @@ class TestProcessResultShaping:
 
         assert result["status"] == "exited"
         assert result["exit_code"] == 7
-        assert "HEAD" in result["output"]
+        assert "HEAD" not in result["output"]
+        assert secret not in result["output"]
         assert "TAIL" in result["output"]
-        assert "[OUTPUT COMPACTED" in result["output"]
-        assert result["compacted"] is True
+        assert "[OUTPUT COMPACTED" not in result["output"]
+        assert "compacted" not in result
 
     def test_wait_full_keeps_exact_existing_tail_window(self, registry):
         output = "HEAD\n" + ("A" * 30000) + "\nTAIL"

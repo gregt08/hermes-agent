@@ -169,6 +169,28 @@ def test_terminal_output_transform_still_runs_strip_and_redact(monkeypatch, tmp_
     assert "***" in result["output"]
 
 
+def test_terminal_redacts_before_compaction_boundaries(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_DISABLE_RESULT_COMPACTION", raising=False)
+    secret = "sk-proj-abc123def456ghi789jkl012mno345"
+    sensitive = f"OPENAI_API_KEY={secret}"
+    # The default compaction preview keeps roughly the first 3600 chars. Place
+    # the secret across that boundary so compact-then-redact would expose a raw
+    # fragment that no longer matches the redactor's full-token patterns.
+    output = ("A" * 3580) + sensitive + "\n" + ("B" * 30000) + "\nTAIL"
+
+    result, _mock_env = _run_terminal(
+        monkeypatch,
+        tmp_path,
+        output=output,
+    )
+
+    assert result["compacted"] is True
+    assert "[OUTPUT COMPACTED" in result["output"]
+    assert secret not in result["output"]
+    assert "OPENAI_API_KEY=sk-" not in result["output"]
+    assert "OPENAI_API_KEY=***" in result["output"]
+
+
 def test_terminal_output_transform_hook_exception_falls_back(monkeypatch, tmp_path):
     def _raise(*_args, **_kwargs):
         raise RuntimeError("boom")

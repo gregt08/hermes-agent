@@ -2132,6 +2132,12 @@ def terminal_tool(
             from tools.ansi_strip import strip_ansi
             output = strip_ansi(output)
 
+            # Redact before any compaction/truncation boundary. If a secret is
+            # split by head/tail shaping first, the redactor may only see raw
+            # fragments and leak the prefix or suffix.
+            from agent.redact import redact_sensitive_text
+            output = redact_sensitive_text(output, force=True) if output else ""
+
             from tools.result_shaping import compact_text_output
             from tools.tool_output_limits import get_max_bytes
             MAX_OUTPUT_CHARS = get_max_bytes()
@@ -2161,9 +2167,7 @@ def terminal_tool(
                 )
                 output = output[:head_chars] + truncated_notice + output[-tail_chars:]
 
-            # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            output = output.strip() if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")

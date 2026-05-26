@@ -986,11 +986,10 @@ class ProcessRegistry:
         self._reconcile_local_exit(session)
 
         with session._lock:
-            full_output = strip_ansi(session.output_buffer) if session.output_buffer else ""
-            fallback_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
+            output_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
 
         shaped = compact_text_output(
-            full_output,
+            output_preview,
             result_mode=result_mode,
             field_name="output_preview",
             threshold_chars=20_000,
@@ -1002,7 +1001,6 @@ class ProcessRegistry:
                 "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
             ),
         )
-        output_preview = shaped.text if shaped.metadata else fallback_preview
 
         result = {
             "session_id": session.id,
@@ -1117,10 +1115,9 @@ class ProcessRegistry:
             self._reconcile_local_exit(session)
             if session.exited:
                 self._completion_consumed.add(session_id)
-                full_output = strip_ansi(session.output_buffer)
-                fallback_output = strip_ansi(session.output_buffer[-2000:])
+                output_window = strip_ansi(session.output_buffer[-2000:])
                 shaped = compact_text_output(
-                    full_output,
+                    output_window,
                     result_mode=result_mode,
                     field_name="output",
                     threshold_chars=20_000,
@@ -1136,7 +1133,7 @@ class ProcessRegistry:
                 result = {
                     "status": "exited",
                     "exit_code": session.exit_code,
-                    "output": shaped.text if shaped.metadata else fallback_output,
+                    "output": shaped.text,
                 }
                 result.update(shaped.metadata)
                 if timeout_note:
@@ -1144,10 +1141,9 @@ class ProcessRegistry:
                 return result
 
             if _is_interrupted():
-                full_output = strip_ansi(session.output_buffer)
-                fallback_output = strip_ansi(session.output_buffer[-1000:])
+                output_window = strip_ansi(session.output_buffer[-1000:])
                 shaped = compact_text_output(
-                    full_output,
+                    output_window,
                     result_mode=result_mode,
                     field_name="output",
                     threshold_chars=20_000,
@@ -1162,7 +1158,7 @@ class ProcessRegistry:
                 )
                 result = {
                     "status": "interrupted",
-                    "output": shaped.text if shaped.metadata else fallback_output,
+                    "output": shaped.text,
                     "note": "User sent a new message -- wait interrupted",
                 }
                 result.update(shaped.metadata)
@@ -1172,10 +1168,9 @@ class ProcessRegistry:
 
             time.sleep(1)
 
-        full_output = strip_ansi(session.output_buffer)
-        fallback_output = strip_ansi(session.output_buffer[-1000:])
+        output_window = strip_ansi(session.output_buffer[-1000:])
         shaped = compact_text_output(
-            full_output,
+            output_window,
             result_mode=result_mode,
             field_name="output",
             threshold_chars=20_000,
@@ -1189,7 +1184,7 @@ class ProcessRegistry:
         )
         result = {
             "status": "timeout",
-            "output": shaped.text if shaped.metadata else fallback_output,
+            "output": shaped.text,
         }
         result.update(shaped.metadata)
         if timeout_note:
