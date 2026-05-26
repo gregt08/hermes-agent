@@ -2371,7 +2371,7 @@ TERMINAL_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "Run the command in the background. Almost always pair with notify_on_complete=true — without it, the process runs silently and you'll have no way to learn it finished short of calling process(action='poll') yourself (easy to forget, leading to silent blindness on long jobs). Two legitimate patterns: (1) Long-lived processes that never exit (servers, watchers, daemons) — these stay silent because there's no exit to notify on. (2) Long-running bounded tasks (tests, builds, deploys, CI pollers, batch jobs) — these MUST set notify_on_complete=true. For short commands, prefer foreground with a generous timeout instead.",
+                "description": "Run the command in the background. pair notify_on_complete=true for long jobs to get notified on exit. Pattern: (1) long-lived servers/watchers — stay silent; (2) bounded tasks (tests, builds, deploys) — MUST set notify_on_complete=true. Short commands: foreground with generous timeout.",
                 "default": False
             },
             "timeout": {
@@ -2390,13 +2390,13 @@ TERMINAL_SCHEMA = {
             },
             "notify_on_complete": {
                 "type": "boolean",
-                "description": "When true (and background=true), you'll be automatically notified exactly once when the process finishes. **This is the right choice for almost every long-running task** — tests, builds, deployments, multi-item batch jobs, anything that takes over a minute and has a defined end. Use this and keep working on other things; the system notifies you on exit. MUTUALLY EXCLUSIVE with watch_patterns — when both are set, watch_patterns is dropped.",
+                "description": "Notify once when background process exits. MUTUALLY EXCLUSIVE with watch_patterns (if both set, watch_patterns is dropped). Required for bounded long jobs (tests, builds, deploys). Use instead of polling process(action='poll').",
                 "default": False
             },
             "watch_patterns": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Strings to watch for in background process output. HARD RATE LIMIT: at most 1 notification per 15 seconds per process — matches arriving inside the cooldown are dropped. After 3 consecutive 15-second windows with dropped matches, watch_patterns is automatically disabled for that process and promoted to notify_on_complete behavior (one notification on exit, no more mid-process spam). USE ONLY for truly rare, one-shot mid-process signals on LONG-LIVED processes that will never exit on their own — e.g. ['Application startup complete'] on a server so you know when to hit its endpoint, or ['migration done'] on a daemon. DO NOT use for: (1) end-of-run markers like 'DONE'/'PASS' — use notify_on_complete instead; (2) error patterns like 'ERROR'/'Traceback' in loops or multi-item batch jobs — they fire on every iteration and you'll hit the strike limit fast; (3) anything you'd ever combine with notify_on_complete. When in doubt, choose notify_on_complete. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both."
+                "description": "Watch background output for strings to trigger notification. HARD RATE LIMIT: 1 notification per 15s per process. After 3 dropped consecutive windows, watch_patterns auto-disables and promotes to notify_on_complete (one exit notification, no more mid-process spam). Use ONLY for rare one-shot signals on LONG-LIVED non-exiting processes (e.g., server startup, daemon migration). DO NOT use for: end-of-run markers ('DONE'/'PASS'), error patterns in loops, or anything you'd combine with notify_on_complete. When in doubt, choose notify_on_complete. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both.",
             },
             "result_mode": {
                 "type": "string",
