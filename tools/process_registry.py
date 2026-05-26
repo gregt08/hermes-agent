@@ -59,6 +59,16 @@ MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
 
+
+def _strip_ansi_and_redact_sensitive_text(text: str) -> str:
+    """Strip terminal control sequences and redact secrets from process output."""
+    from agent.redact import redact_sensitive_text
+    from tools.ansi_strip import strip_ansi
+
+    if text is None:
+        return ""
+    return redact_sensitive_text(strip_ansi(text), force=True)
+
 # Watch pattern rate limiting — PER SESSION.
 # Hard rule: at most ONE watch-match notification every WATCH_MIN_INTERVAL_SECONDS.
 # Any match arriving inside that cooldown window is dropped and counted as a strike.
@@ -858,8 +868,8 @@ class ProcessRegistry:
         # this guard, kill_process() and the reader thread can both call
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
         if was_running and session.notify_on_complete:
-            from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output = _strip_ansi_and_redact_sensitive_text(session.output_buffer) if session.output_buffer else ""
+            output_tail = output[-2000:]
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
@@ -972,9 +982,9 @@ class ProcessRegistry:
         )
         self._move_to_finished(session)
 
-    def poll(self, session_id: str) -> dict:
+    def poll(self, session_id: str, result_mode: str = "auto") -> dict:
         """Check status and get new output for a background process."""
-        from tools.ansi_strip import strip_ansi
+        from tools.result_shaping import compact_text_output
 
         session = self.get(session_id)
         if session is None:
@@ -985,7 +995,22 @@ class ProcessRegistry:
         self._reconcile_local_exit(session)
 
         with session._lock:
-            output_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
+            output = _strip_ansi_and_redact_sensitive_text(session.output_buffer) if session.output_buffer else ""
+            output_preview = output[-1000:]
+
+        shaped = compact_text_output(
+            output_preview,
+            result_mode=result_mode,
+            field_name="output_preview",
+            threshold_chars=20_000,
+            preview_chars=800,
+            hint=(
+                "Large process poll output compacted. Use result_mode='full' "
+                "for the exact poll preview window, or process(action='log', "
+                "offset=..., limit=...) to page the stored process log. Set "
+                "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
+            ),
+        )
 
         result = {
             "session_id": session.id,
@@ -993,8 +1018,9 @@ class ProcessRegistry:
             "status": "exited" if session.exited else "running",
             "pid": session.pid,
             "uptime_seconds": int(time.time() - session.started_at),
-            "output_preview": output_preview,
+            "output_preview": shaped.text,
         }
+        result.update(shaped.metadata)
         if session.exited:
             result["exit_code"] = session.exit_code
             self._completion_consumed.add(session_id)
@@ -1003,16 +1029,17 @@ class ProcessRegistry:
             result["note"] = "Process recovered after restart -- output history unavailable"
         return result
 
-    def read_log(self, session_id: str, offset: int = 0, limit: int = 200) -> dict:
+    def read_log(self, session_id: str, offset: int = 0, limit: int = 200,
+                 result_mode: str = "auto") -> dict:
         """Read the full output log with optional pagination by lines."""
-        from tools.ansi_strip import strip_ansi
+        from tools.result_shaping import compact_text_output
 
         session = self.get(session_id)
         if session is None:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
+            full_output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
 
         lines = full_output.splitlines()
         total_lines = len(lines)
@@ -1023,18 +1050,34 @@ class ProcessRegistry:
         else:
             selected = lines[offset:offset + limit]
 
+        selected_output = "\n".join(selected)
+        shaped = compact_text_output(
+            selected_output,
+            result_mode=result_mode,
+            field_name="output",
+            threshold_chars=20_000,
+            preview_chars=8_000,
+            hint=(
+                "Large process log output compacted. Use result_mode='full' "
+                f"with offset={offset}, limit={limit} for the exact selected "
+                "window, or narrow offset/limit. Set "
+                "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
+            ),
+        )
+
         result = {
             "session_id": session.id,
             "status": "exited" if session.exited else "running",
-            "output": "\n".join(selected),
+            "output": shaped.text,
             "total_lines": total_lines,
             "showing": f"{len(selected)} lines",
         }
+        result.update(shaped.metadata)
         if session.exited:
             self._completion_consumed.add(session_id)
         return result
 
-    def wait(self, session_id: str, timeout: int = None) -> dict:
+    def wait(self, session_id: str, timeout: int = None, result_mode: str = "auto") -> dict:
         """
         Block until a process exits, timeout, or interrupt.
 
@@ -1046,8 +1089,8 @@ class ProcessRegistry:
             dict with status ("exited", "timeout", "interrupted", "not_found")
             and output snapshot.
         """
-        from tools.ansi_strip import strip_ansi
         from tools.interrupt import is_interrupted as _is_interrupted
+        from tools.result_shaping import compact_text_output
 
         try:
             default_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
@@ -1080,31 +1123,81 @@ class ProcessRegistry:
             self._reconcile_local_exit(session)
             if session.exited:
                 self._completion_consumed.add(session_id)
+                output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+                output_window = output[-2000:]
+                shaped = compact_text_output(
+                    output_window,
+                    result_mode=result_mode,
+                    field_name="output",
+                    threshold_chars=20_000,
+                    preview_chars=8_000,
+                    hint=(
+                        "Large process wait output compacted. Use "
+                        "result_mode='full' for the exact wait output window, "
+                        "or process(action='log', offset=..., limit=...) to page "
+                        "the stored process log. Set "
+                        "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
+                    ),
+                )
                 result = {
                     "status": "exited",
                     "exit_code": session.exit_code,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
+                    "output": shaped.text,
                 }
+                result.update(shaped.metadata)
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
 
             if _is_interrupted():
+                output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+                output_window = output[-1000:]
+                shaped = compact_text_output(
+                    output_window,
+                    result_mode=result_mode,
+                    field_name="output",
+                    threshold_chars=20_000,
+                    preview_chars=8_000,
+                    hint=(
+                        "Large process wait output compacted. Use "
+                        "result_mode='full' for the exact wait output window, "
+                        "or process(action='log', offset=..., limit=...) to page "
+                        "the stored process log. Set "
+                        "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
+                    ),
+                )
                 result = {
                     "status": "interrupted",
-                    "output": strip_ansi(session.output_buffer[-1000:]),
+                    "output": shaped.text,
                     "note": "User sent a new message -- wait interrupted",
                 }
+                result.update(shaped.metadata)
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
 
             time.sleep(1)
 
+        output = _strip_ansi_and_redact_sensitive_text(session.output_buffer)
+        output_window = output[-1000:]
+        shaped = compact_text_output(
+            output_window,
+            result_mode=result_mode,
+            field_name="output",
+            threshold_chars=20_000,
+            preview_chars=8_000,
+            hint=(
+                "Large process wait output compacted. Use result_mode='full' "
+                "for the exact wait output window, or process(action='log', "
+                "offset=..., limit=...) to page the stored process log. Set "
+                "HERMES_DISABLE_RESULT_COMPACTION=1 to disable result compaction."
+            ),
+        )
         result = {
             "status": "timeout",
-            "output": strip_ansi(session.output_buffer[-1000:]),
+            "output": shaped.text,
         }
+        result.update(shaped.metadata)
         if timeout_note:
             result["timeout_note"] = timeout_note
         else:
@@ -1487,7 +1580,7 @@ def format_process_notification(evt: dict) -> "str | None":
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _out = _strip_ansi_and_redact_sensitive_text(evt.get("output", ""))
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1501,7 +1594,7 @@ def format_process_notification(evt: dict) -> "str | None":
         return text
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = _strip_ansi_and_redact_sensitive_text(evt.get("output", ""))
     return (
         f"[IMPORTANT: Background process {_sid} completed "
         f"(exit code {_exit}).\n"
@@ -1553,6 +1646,12 @@ PROCESS_SCHEMA = {
                 "type": "integer",
                 "description": "Max lines to return for 'log' action",
                 "minimum": 1
+            },
+            "result_mode": {
+                "type": "string",
+                "enum": ["auto", "full", "preview"],
+                "description": "Output detail level for poll/log/wait. auto compacts large process output with head/tail preview; full preserves the action's exact output window; preview compacts whenever possible. HERMES_DISABLE_RESULT_COMPACTION=1/true/yes/on disables compaction.",
+                "default": "auto"
             }
         },
         "required": ["action"]
@@ -1571,13 +1670,16 @@ def _handle_process(args, **kw):
     elif action in {"poll", "log", "wait", "kill", "write", "submit", "close"}:
         if not session_id:
             return tool_error(f"session_id is required for {action}")
+        result_mode = args.get("result_mode", "auto")
         if action == "poll":
-            return json.dumps(process_registry.poll(session_id), ensure_ascii=False)
+            return json.dumps(process_registry.poll(session_id, result_mode=result_mode), ensure_ascii=False)
         elif action == "log":
             return json.dumps(process_registry.read_log(
-                session_id, offset=args.get("offset", 0), limit=args.get("limit", 200)), ensure_ascii=False)
+                session_id, offset=args.get("offset", 0), limit=args.get("limit", 200),
+                result_mode=result_mode), ensure_ascii=False)
         elif action == "wait":
-            return json.dumps(process_registry.wait(session_id, timeout=args.get("timeout")), ensure_ascii=False)
+            return json.dumps(process_registry.wait(
+                session_id, timeout=args.get("timeout"), result_mode=result_mode), ensure_ascii=False)
         elif action == "kill":
             return json.dumps(process_registry.kill_process(session_id), ensure_ascii=False)
         elif action == "write":

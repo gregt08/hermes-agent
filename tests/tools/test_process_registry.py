@@ -102,6 +102,117 @@ class TestGetAndPoll:
         assert result["status"] == "exited"
         assert result["exit_code"] == 0
 
+    def test_poll_large_output_uses_recent_preview_window(self, registry):
+        secret = "OPENAI_API_KEY=sk-proj-earlysecret1234567890abcdef"
+        output = f"HEAD {secret}\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(output=output)
+        registry._running[s.id] = s
+
+        result = registry.poll(s.id)
+
+        assert result["status"] == "running"
+        assert result["session_id"] == s.id
+        assert result["command"] == "echo hello"
+        assert "HEAD" not in result["output_preview"]
+        assert secret not in result["output_preview"]
+        assert "TAIL" in result["output_preview"]
+        assert "[OUTPUT_PREVIEW COMPACTED" not in result["output_preview"]
+        assert "compacted" not in result
+
+    def test_poll_result_mode_full_keeps_exact_preview_window(self, registry):
+        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(output=output)
+        registry._running[s.id] = s
+
+        result = registry.poll(s.id, result_mode="full")
+
+        assert result["output_preview"] == output[-1000:]
+        assert "compacted" not in result
+
+    def test_poll_preview_mode_returns_shaped_text_and_metadata(self, registry):
+        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(output=output)
+        registry._running[s.id] = s
+
+        result = registry.poll(s.id, result_mode="preview")
+
+        assert result["status"] == "running"
+        assert result["compacted"] is True
+        assert "[OUTPUT_PREVIEW COMPACTED" in result["output_preview"]
+        assert result["output_preview_original_chars"] == 1000
+        assert result["output_preview_omitted_chars"] > 0
+
+
+class TestProcessResultShaping:
+    def test_read_log_large_window_compacted(self, registry):
+        lines = ["HEAD"] + [f"line {i} " + ("A" * 200) for i in range(180)] + ["TAIL"]
+        s = _make_session(output="\n".join(lines))
+        registry._running[s.id] = s
+
+        result = registry.read_log(s.id, offset=0, limit=500)
+
+        assert result["status"] == "running"
+        assert result["total_lines"] == len(lines)
+        assert "HEAD" in result["output"]
+        assert "TAIL" in result["output"]
+        assert "[OUTPUT COMPACTED" in result["output"]
+        assert result["compacted"] is True
+        assert "result_mode='full'" in result["_hint"]
+
+    def test_read_log_full_and_env_opt_out_keep_exact_window(self, registry, monkeypatch):
+        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(output=output)
+        registry._running[s.id] = s
+
+        full_result = registry.read_log(s.id, offset=0, limit=10, result_mode="full")
+        assert full_result["output"] == output
+        assert "compacted" not in full_result
+
+        monkeypatch.setenv("HERMES_DISABLE_RESULT_COMPACTION", "on")
+        preview_result = registry.read_log(s.id, offset=0, limit=10, result_mode="preview")
+        assert preview_result["output"] == output
+        assert "compacted" not in preview_result
+
+    def test_wait_large_exited_output_uses_recent_window(self, registry):
+        secret = "OPENAI_API_KEY=sk-proj-earlysecret1234567890abcdef"
+        output = f"HEAD {secret}\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(exited=True, exit_code=7, output=output)
+        registry._finished[s.id] = s
+
+        result = registry.wait(s.id, timeout=1)
+
+        assert result["status"] == "exited"
+        assert result["exit_code"] == 7
+        assert "HEAD" not in result["output"]
+        assert secret not in result["output"]
+        assert "TAIL" in result["output"]
+        assert "[OUTPUT COMPACTED" not in result["output"]
+        assert "compacted" not in result
+
+    def test_wait_redacts_openai_api_key_secret(self, registry):
+        secret = "OPENAI_API_KEY=sk-proj-waitsecret1234567890abcdef"
+        output = f"starting\n{secret}\ndone"
+        s = _make_session(exited=True, exit_code=0, output=output)
+        registry._finished[s.id] = s
+
+        result = registry.wait(s.id, timeout=1, result_mode="full")
+
+        assert result["status"] == "exited"
+        assert secret not in result["output"]
+        assert "sk-proj-waitsecret" not in result["output"]
+        assert "OPENAI_API_KEY=***" in result["output"]
+
+    def test_wait_full_keeps_exact_existing_tail_window(self, registry):
+        output = "HEAD\n" + ("A" * 30000) + "\nTAIL"
+        s = _make_session(exited=True, exit_code=0, output=output)
+        registry._finished[s.id] = s
+
+        result = registry.wait(s.id, timeout=1, result_mode="full")
+
+        assert result["status"] == "exited"
+        assert result["output"] == output[-2000:]
+        assert "compacted" not in result
+
 
 # =========================================================================
 # Orphaned-pipe reconciliation (issue #17327)
@@ -873,6 +984,27 @@ class TestProcessToolHandler:
         result = json.loads(_handle_process({"action": "unknown_action"}))
         assert "error" in result
 
+    def test_log_action_redacts_openai_api_key_secret(self):
+        from tools.process_registry import _handle_process, process_registry
+
+        secret = "OPENAI_API_KEY=sk-proj-logsecret1234567890abcdef"
+        s = _make_session(sid="proc_log_redact", output=f"before\n{secret}\nafter")
+        process_registry._running[s.id] = s
+        try:
+            result = json.loads(_handle_process({
+                "action": "log",
+                "session_id": s.id,
+                "result_mode": "full",
+            }))
+        finally:
+            process_registry._running.pop(s.id, None)
+            process_registry._finished.pop(s.id, None)
+
+        assert result["status"] == "running"
+        assert secret not in result["output"]
+        assert "sk-proj-logsecret" not in result["output"]
+        assert "OPENAI_API_KEY=***" in result["output"]
+
 
 # =========================================================================
 # format_process_notification + drain_notifications (shared helpers)
@@ -894,6 +1026,21 @@ def test_format_completion_event():
     assert "exit code 0" in result
     assert "Command: sleep 5" in result
     assert "Output:\ndone]" in result
+
+
+def test_format_completion_event_redacts_openai_api_key_secret():
+    secret = "OPENAI_API_KEY=sk-proj-notifysecret1234567890abcdef"
+    evt = {
+        "type": "completion",
+        "session_id": "proc_abc",
+        "command": "sleep 5",
+        "exit_code": 0,
+        "output": f"done\n{secret}",
+    }
+    result = format_process_notification(evt)
+    assert secret not in result
+    assert "sk-proj-notifysecret" not in result
+    assert "OPENAI_API_KEY=***" in result
 
 
 def test_format_watch_match_event():
