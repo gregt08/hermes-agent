@@ -2320,34 +2320,36 @@ def shape_browser_snapshot(snapshot_text: str, result_mode: str = "auto", max_ch
 
     lines = snapshot_text.splitlines()
     keep: dict[int, str] = {}
+    priority: dict[int, int] = {}
 
-    def add_line(idx: int) -> None:
+    def add_line(idx: int, score: int = 0) -> None:
         if 0 <= idx < len(lines):
             keep[idx] = lines[idx]
+            priority[idx] = max(priority.get(idx, 0), score)
 
     for idx in range(min(40, len(lines))):
-        add_line(idx)
+        add_line(idx, 1)
     for idx in range(max(0, len(lines) - 20), len(lines)):
-        add_line(idx)
+        add_line(idx, 1)
 
     for idx, line in enumerate(lines):
         if _SNAPSHOT_REF_RE.search(line) or _SNAPSHOT_ACTION_RE.search(line):
-            add_line(idx)
-            add_line(idx - 1)
-            add_line(idx + 1)
+            add_line(idx, 10)
+            add_line(idx - 1, 5)
+            add_line(idx + 1, 5)
 
-    ordered = sorted(keep)
     budget = max(max_chars - 500, 1000)
-    selected: list[tuple[int, str]] = []
+    selected_by_idx: dict[int, str] = {}
     used = 0
-    for idx in ordered:
+    for idx in sorted(keep, key=lambda line_idx: (-priority.get(line_idx, 0), line_idx)):
         line = keep[idx]
         line_cost = len(line) + 1
-        if used + line_cost > budget and selected:
+        if used + line_cost > budget and selected_by_idx:
             continue
-        selected.append((idx, line))
+        selected_by_idx[idx] = line
         used += line_cost
 
+    selected = sorted(selected_by_idx.items())
     omitted_lines = max(len(lines) - len(selected), 0)
     selected_text = "\n".join(line for _, line in selected)
     omitted_chars = max(len(snapshot_text) - len(selected_text), 0)

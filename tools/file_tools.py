@@ -581,7 +581,10 @@ def _compact_read_result(result_dict: dict, *, path: str, offset: int,
         "Large read_file output compacted. "
         f"Use result_mode='full' with path={path!r}, offset={offset}, limit={limit} "
         "for the exact full window, or read a narrower range with offset and limit. "
-        f"Use offset={next_offset} to continue after this preview."
+        f"Next continuation call: read_file(path={path!r}, offset={next_offset}, "
+        f"limit={limit}, result_mode='auto'). "
+        "For a narrower expansion, use the visible line numbers to choose a smaller "
+        "offset/limit around the needed section."
     )
     return compacted
 
@@ -634,7 +637,9 @@ def _compact_search_result(result_dict: dict, *, pattern: str, path: str,
         f"limit={limit}, offset={offset}, output_mode='content', context={context} "
         "for exact full match detail. Use output_mode='files_only' or 'count' "
         "to inspect broad searches cheaply, or narrow pattern/file_glob. "
-        f"Use offset={next_offset} to page forward."
+        f"Next continuation call: search_files(pattern={pattern!r}, path={path!r}, "
+        f"limit={limit}, offset={next_offset}, output_mode='content', "
+        f"context={context}, result_mode='auto')."
     )
     return compacted
 
