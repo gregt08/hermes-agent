@@ -405,6 +405,66 @@ class TestResultShaping(unittest.TestCase):
         self.assertGreater(result["omitted_matches"], 0)
         self.assertIn("offset=12", result["_hint"])
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_compacted_truncated_search_has_single_consistent_offset_hint(self, mock_ops):
+        matches = [
+            _FakeSearchMatch(f"/tmp/file_{i}.py", i, "needle " + ("x" * 700))
+            for i in range(1, 45)
+        ]
+        fake = MagicMock()
+        fake.search.return_value = _FakeSearchResult(
+            matches=matches,
+            total_count=100,
+            truncated=True,
+        )
+        mock_ops.return_value = fake
+
+        raw = search_tool(
+            "needle",
+            path="/tmp",
+            limit=50,
+            output_mode="content",
+            task_id="large-search-truncated-compacted",
+        )
+        result = json.loads(raw)
+
+        self.assertTrue(result["compacted"])
+        self.assertIn("offset=12", result["_hint"])
+        self.assertNotIn("Results truncated", raw)
+        self.assertNotIn("offset=50", raw)
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_repeated_search_full_mode_has_distinct_identity(self, mock_ops):
+        matches = [
+            _FakeSearchMatch(f"/tmp/file_{i}.py", i, "needle " + ("x" * 700))
+            for i in range(1, 45)
+        ]
+        fake = MagicMock()
+        fake.search.return_value = _FakeSearchResult(matches=matches, total_count=44)
+        mock_ops.return_value = fake
+
+        for _ in range(4):
+            json.loads(search_tool(
+                "needle",
+                path="/tmp",
+                limit=50,
+                output_mode="content",
+                task_id="large-search-full-distinct",
+            ))
+
+        result = json.loads(search_tool(
+            "needle",
+            path="/tmp",
+            limit=50,
+            output_mode="content",
+            result_mode="full",
+            task_id="large-search-full-distinct",
+        ))
+
+        self.assertNotIn("error", result)
+        self.assertNotIn("compacted", result)
+        self.assertEqual(len(result["matches"]), len(matches))
+
     @patch("tools.file_tools.file_state.record_read")
     @patch("tools.file_tools._get_file_ops")
     def test_compacted_read_is_recorded_as_partial(self, mock_ops, mock_record_read):
