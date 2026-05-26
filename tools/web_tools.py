@@ -861,6 +861,8 @@ def _shape_web_extract_result(result: Dict[str, Any], result_mode: str = "auto")
         result_mode=result_mode,
         field_name="content",
         hint="Use result_mode='full' to return complete extracted content.",
+        relevance_context_lines=2,
+        max_relevance_snippets=10,
     )
     if not compacted.metadata:
         return result

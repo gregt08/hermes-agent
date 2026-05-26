@@ -290,6 +290,8 @@ class TestResultShaping(unittest.TestCase):
         self.assertLess(len(result["content"]), len(content))
         self.assertIn("result_mode='full'", result["_hint"])
         self.assertIn("offset=", result["_hint"])
+        self.assertIn("Next continuation call: read_file", result["_hint"])
+        self.assertIn("result_mode='auto'", result["_hint"])
         self.assertGreater(result["omitted_lines_from_window"], 0)
 
     @patch("tools.file_tools._get_file_ops")
@@ -402,6 +404,8 @@ class TestResultShaping(unittest.TestCase):
         self.assertLess(len(result["matches"]), len(matches))
         self.assertIn("result_mode='full'", result["_hint"])
         self.assertIn("output_mode='files_only'", result["_hint"])
+        self.assertIn("Next continuation call: search_files", result["_hint"])
+        self.assertIn("result_mode='auto'", result["_hint"])
         self.assertGreater(result["omitted_matches"], 0)
         self.assertIn("offset=12", result["_hint"])
 

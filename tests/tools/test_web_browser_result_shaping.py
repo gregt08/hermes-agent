@@ -39,6 +39,35 @@ def test_web_extract_large_auto_compacts_content():
     assert len(shaped["content"]) < len(content)
 
 
+def test_web_extract_preserves_relevant_middle_snippets():
+    content = (
+        "HEAD\n"
+        + ("ordinary content\n" * 1800)
+        + "Security verification failed: CAPTCHA required before continue.\n"
+        + "Use the login submit action after verification.\n"
+        + ("ordinary tail content\n" * 1800)
+        + "TAIL"
+    )
+    result = {
+        "url": "https://example.com/security",
+        "title": "Security",
+        "content": content,
+        "error": None,
+        "blocked": False,
+    }
+
+    shaped = _shape_web_extract_result(result, "auto")
+
+    assert shaped["url"] == result["url"]
+    assert shaped["title"] == result["title"]
+    assert shaped["blocked"] is False
+    assert shaped["compacted"] is True
+    assert "[RELEVANT OMITTED SNIPPETS]" in shaped["content"]
+    assert "Security verification failed" in shaped["content"]
+    assert "login submit action" in shaped["content"]
+    assert shaped["content_relevance_snippets"] >= 1
+
+
 def test_web_extract_full_and_env_optout_preserve_content(monkeypatch):
     content = "HEAD\n" + ("middle\n" * 4000) + "TAIL"
     result = {
@@ -86,6 +115,25 @@ def test_browser_snapshot_large_default_preserves_refs_and_actions():
     assert "@e34" in shaped
     assert "Verification required" in shaped
     assert "result_mode='full'" in shaped
+
+
+def test_browser_snapshot_relevant_middle_lines_win_budget():
+    lines = ["heading"]
+    lines.extend(f"static header line {i} " + ("x" * 160) for i in range(80))
+    lines.extend(f"static middle line {i}" for i in range(1000))
+    lines.append('button "Log in" [ref=e77]')
+    lines.append("alert CAPTCHA verify required")
+    lines.append("link Continue @e88")
+    lines.extend(f"static footer line {i} " + ("y" * 160) for i in range(80))
+    snapshot = "\n".join(lines)
+
+    shaped = browser_tool.shape_browser_snapshot(snapshot, result_mode="auto", max_chars=2200)
+
+    assert len(shaped) < len(snapshot)
+    assert "[SNAPSHOT COMPACTED:" in shaped
+    assert "[ref=e77]" in shaped
+    assert "@e88" in shaped
+    assert "CAPTCHA verify required" in shaped
 
 
 def test_browser_snapshot_full_and_env_optout_preserve_exact(monkeypatch):
