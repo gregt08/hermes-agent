@@ -170,6 +170,28 @@ class TestCreateJob:
                 assert call_kwargs["origin"]["user_agent"] == "cron-client"
 
     @pytest.mark.asyncio
+    async def test_create_job_allows_explicit_fallback_providers(self, adapter):
+        """POST /api/jobs passes explicit job-local fallback providers through."""
+        app = _create_app(adapter)
+        mock_create = MagicMock(return_value=SAMPLE_JOB)
+        fallback = [{"provider": "openrouter", "model": "gpt-4o-mini"}]
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_create", mock_create
+            ):
+                resp = await cli.post("/api/jobs", json={
+                    "name": "test-job",
+                    "schedule": "*/5 * * * *",
+                    "prompt": "do something",
+                    "fallback_providers": fallback,
+                })
+                assert resp.status == 200
+                call_kwargs = mock_create.call_args[1]
+                assert call_kwargs["fallback_providers"] == fallback
+
+    @pytest.mark.asyncio
     async def test_create_job_missing_name(self, adapter):
         """POST /api/jobs without name returns 400."""
         app = _create_app(adapter)
@@ -369,6 +391,27 @@ class TestUpdateJob:
                 assert "name" in sanitized
                 assert "evil_field" not in sanitized
                 assert "__proto__" not in sanitized
+
+    @pytest.mark.asyncio
+    async def test_update_job_allows_explicit_fallback_providers(self, adapter):
+        """PATCH /api/jobs/{id} allows explicit job-local fallback providers."""
+        app = _create_app(adapter)
+        updated_job = {**SAMPLE_JOB, "fallback_providers": [{"provider": "openrouter"}]}
+        mock_update = MagicMock(return_value=updated_job)
+        fallback = [{"provider": "openrouter", "model": "gpt-4o-mini"}]
+        async with TestClient(TestServer(app)) as cli:
+            with patch(
+                f"{_MOD}._CRON_AVAILABLE", True
+            ), patch(
+                f"{_MOD}._cron_update", mock_update
+            ):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"fallback_providers": fallback},
+                )
+                assert resp.status == 200
+                sanitized = mock_update.call_args[0][1]
+                assert sanitized["fallback_providers"] == fallback
 
     @pytest.mark.asyncio
     async def test_update_job_no_valid_fields(self, adapter):

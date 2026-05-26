@@ -271,6 +271,14 @@ class TestJobCRUD:
         job = create_job(prompt="Test", schedule="30m")
         assert job["deliver"] == "local"
 
+    def test_create_job_persists_explicit_fallback_providers(self, tmp_cron_dir):
+        fallback = [{"provider": "openrouter", "model": "gpt-4o-mini"}]
+        job = create_job(prompt="Test", schedule="30m", fallback_providers=fallback)
+
+        fetched = get_job(job["id"])
+        assert fetched is not None
+        assert fetched["fallback_providers"] == fallback
+
 
 class TestUpdateJob:
     def test_update_name(self, tmp_cron_dir):
@@ -327,6 +335,18 @@ class TestUpdateJob:
         # Original job still resolvable, no rename happened.
         assert get_job(job["id"]) is not None
         assert get_job("../escape") is None
+
+    def test_update_job_persists_explicit_fallback_providers(self, tmp_cron_dir):
+        job = create_job(prompt="Original", schedule="every 1h")
+        fallback = [{"provider": "openrouter", "model": "gpt-4o-mini"}]
+
+        updated = update_job(job["id"], {"fallback_providers": fallback})
+
+        assert updated is not None
+        assert updated["fallback_providers"] == fallback
+        fetched = get_job(job["id"])
+        assert fetched is not None
+        assert fetched["fallback_providers"] == fallback
 
 
 class TestPauseResumeJob:

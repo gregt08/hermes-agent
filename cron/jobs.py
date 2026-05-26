@@ -101,6 +101,30 @@ def _coerce_job_text(value: Any, fallback: str = "") -> str:
     return str(value)
 
 
+def _normalize_fallback_chain(value: Any) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
+    """Normalize a job-local fallback chain for storage.
+
+    Cron runs intentionally do not inherit the profile-wide fallback chain. Jobs
+    that need failover must carry an explicit local chain, so creation/update
+    paths need a small, predictable storage shape for those entries.
+    """
+    if value in (None, "", False):
+        return None
+    if isinstance(value, dict):
+        cleaned = {str(k): v for k, v in value.items() if v not in (None, "")}
+        return cleaned or None
+    if isinstance(value, list):
+        cleaned_items: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            cleaned = {str(k): v for k, v in item.items() if v not in (None, "")}
+            if cleaned:
+                cleaned_items.append(cleaned)
+        return cleaned_items or None
+    raise ValueError("fallback_providers must be an object, a list of objects, or null")
+
+
 def _schedule_display_for_job(job: Dict[str, Any]) -> str:
     display = _coerce_job_text(job.get("schedule_display")).strip()
     if display:
@@ -545,6 +569,8 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
+    fallback_providers: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
+    fallback_model: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -591,6 +617,11 @@ def create_job(
                 credentials, scripts, skills, and memory paths resolve
                 consistently. ``default`` selects the root profile; empty /
                 None preserves the scheduler's existing behaviour.
+        fallback_providers: Optional job-local fallback provider chain. Cron
+                jobs do not inherit profile-wide fallbacks; set this explicitly
+                for jobs that should fail over when their primary provider is
+                unavailable.
+        fallback_model: Legacy alias for ``fallback_providers``.
         no_agent: When True, skip the agent entirely — run ``script`` on schedule
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
@@ -629,6 +660,9 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
+    normalized_fallback = _normalize_fallback_chain(
+        fallback_providers if fallback_providers is not None else fallback_model
+    )
     normalized_no_agent = bool(no_agent)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
@@ -685,6 +719,8 @@ def create_job(
         "workdir": normalized_workdir,
         "profile": normalized_profile,
     }
+    if normalized_fallback is not None:
+        job["fallback_providers"] = normalized_fallback
 
     jobs = load_jobs()
     jobs.append(job)
@@ -781,6 +817,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = None
             else:
                 updates["profile"] = _normalize_profile(_profile)
+
+        if "fallback_providers" in updates:
+            updates["fallback_providers"] = _normalize_fallback_chain(updates["fallback_providers"])
+        if "fallback_model" in updates:
+            updates["fallback_model"] = _normalize_fallback_chain(updates["fallback_model"])
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates

@@ -415,6 +415,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["workdir"] = job["workdir"]
     if job.get("profile"):
         result["profile"] = job["profile"]
+    if job.get("fallback_providers"):
+        result["fallback_providers"] = job["fallback_providers"]
     return result
 
 
@@ -438,6 +440,7 @@ def cronjob(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
+    fallback_providers: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     no_agent: Optional[bool] = None,
     task_id: str = None,
 ) -> str:
@@ -505,6 +508,7 @@ def cronjob(
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
                 profile=_normalize_optional_job_value(profile),
+                fallback_providers=fallback_providers,
                 no_agent=_no_agent,
             )
             return json.dumps(
@@ -643,6 +647,10 @@ def cronjob(
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
                 updates["profile"] = _normalize_optional_job_value(profile) or None
+            if fallback_providers is not None:
+                # Empty list clears the field; otherwise update_job() validates
+                # and normalizes the explicit job-local fallback chain.
+                updates["fallback_providers"] = fallback_providers or None
             if no_agent is not None:
                 # Toggling no_agent on/off at update time. If flipping to True,
                 # we need a script to already exist on the job (or be part of
@@ -799,6 +807,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "profile": {
                 "type": "string",
                 "description": "Optional Hermes profile name to run the job under. When set, the scheduler resolves that profile, applies a context-local Hermes home override, loads that profile's config/.env for the run, and bridges HERMES_HOME into subprocesses. Any temporary process-environment changes from profile .env loading are restored after the job exits. Use 'default' for the root Hermes profile. Named profiles must already exist. When unset (default), preserves the scheduler's existing profile. On update, pass an empty string to clear. Jobs with profile run sequentially (not parallel) to keep profile-scoped runtime state isolated."
+            },
+            "fallback_providers": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Optional explicit job-local fallback provider chain. Cron jobs do not inherit the profile/global fallback_providers list; set this only for jobs that should fail over when their primary provider is unavailable. On update, pass [] to clear."
             },
         },
         "required": ["action"]
