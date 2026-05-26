@@ -13,11 +13,14 @@ _DISABLE_RESULT_COMPACTION_ENV = "HERMES_DISABLE_RESULT_COMPACTION"
 _DEFAULT_RELEVANCE_RE = re.compile(
     r"\b("
     r"error|warning|failed|failure|exception|traceback|denied|blocked|captcha|"
-    r"verify|verification|login|log in|sign in|signin|password|token|"
+    r"verify|verification|login|log in|sign in|signin|"
     r"submit|continue|next|action|required|security|forbidden|unauthorized"
-    r")\b|(?:@e\d+|\[ref=e\d+\])",
+    r")\b"
+    r"|(?:@e\d+|\[ref=e\d+\])",
     re.IGNORECASE,
 )
+_RELEVANT_SNIPPETS_HEADER = "[RELEVANT OMITTED SNIPPETS]\n"
+_DEFAULT_SECRET_TERM_RE = re.compile(r"\b(password|token)\b", re.IGNORECASE)
 
 
 def normalize_result_mode(value: str | None) -> str:
@@ -78,7 +81,7 @@ def compact_text_output(
     if relevance_text and len(relevance_text) > snippet_budget:
         relevance_text = relevance_text[:snippet_budget].rstrip() + "\n... [relevance snippets truncated]"
     if relevance_text:
-        middle_chars = len(relevance_text) + 2
+        middle_chars = len(_RELEVANT_SNIPPETS_HEADER) + len(relevance_text) + 2
         head_chars = max(1, head_chars - middle_chars // 2)
         tail_chars = max(1, tail_chars - (middle_chars - middle_chars // 2))
 
@@ -110,9 +113,10 @@ def compact_text_output(
 
     compacted_text = text[:head_chars] + notice
     if relevance_text:
-        compacted_text += "[RELEVANT OMITTED SNIPPETS]\n" + relevance_text + "\n\n"
+        compacted_text += _RELEVANT_SNIPPETS_HEADER + relevance_text + "\n\n"
         metadata[f"{field_name}_relevance_snippets"] = relevance_text.count("\n---\n") + 1
     compacted_text += text[-tail_chars:]
+    metadata[f"{field_name}_preview_chars"] = len(compacted_text)
 
     return CompactedText(text=compacted_text, metadata=metadata)
 
@@ -151,6 +155,8 @@ def _relevance_snippets(
         line_end = cursor + len(line)
         cursor = line_end + 1
         if line_end <= head_chars or line_start >= len(text) - tail_chars:
+            continue
+        if patterns is None and _DEFAULT_SECRET_TERM_RE.search(line):
             continue
         if not any(pattern.search(line) for pattern in compiled):
             continue
