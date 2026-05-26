@@ -2598,9 +2598,11 @@ def browser_snapshot(
 
     effective_task_id = _last_session_key(task_id or "default")
 
-    # Build command args based on full flag
+    # Build command args based on the effective output mode. result_mode="full"
+    # is documented as equivalent to full=True, so do not request a compact
+    # backend snapshot when the caller asks for full output via result_mode.
     args = []
-    if not full:
+    if effective_result_mode != "full":
         args.extend(["-c"])  # Compact mode
 
     result = _run_browser_command(effective_task_id, "snapshot", args)
