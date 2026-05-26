@@ -1,0 +1,167 @@
+import json
+
+from tools import browser_tool
+from tools.web_tools import _shape_web_extract_result
+
+
+def test_web_extract_small_content_preserves_metadata():
+    result = {
+        "url": "https://example.com",
+        "title": "Example",
+        "content": "short content",
+        "error": None,
+    }
+
+    shaped = _shape_web_extract_result(result, "auto")
+
+    assert shaped == result
+
+
+def test_web_extract_large_auto_compacts_content():
+    content = "HEAD\n" + ("middle\n" * 4000) + "TAIL"
+    result = {
+        "url": "https://example.com/long",
+        "title": "Long",
+        "content": content,
+        "error": None,
+    }
+
+    shaped = _shape_web_extract_result(result, "auto")
+
+    assert shaped["url"] == result["url"]
+    assert shaped["title"] == result["title"]
+    assert shaped["compacted"] is True
+    assert shaped["content_original_chars"] == len(content)
+    assert "CONTENT COMPACTED" in shaped["content"]
+    assert "HEAD" in shaped["content"]
+    assert "TAIL" in shaped["content"]
+    assert "result_mode='full'" in shaped["_hint"]
+    assert len(shaped["content"]) < len(content)
+
+
+def test_web_extract_full_and_env_optout_preserve_content(monkeypatch):
+    content = "HEAD\n" + ("middle\n" * 4000) + "TAIL"
+    result = {
+        "url": "https://example.com/long",
+        "title": "Long",
+        "content": content,
+        "error": None,
+    }
+
+    assert _shape_web_extract_result(result, "full") == result
+
+    monkeypatch.setenv("HERMES_DISABLE_RESULT_COMPACTION", "true")
+    assert _shape_web_extract_result(result, "preview") == result
+
+
+def test_web_extract_error_result_unchanged():
+    result = {
+        "url": "https://example.com/fail",
+        "title": "",
+        "content": "x" * 50000,
+        "error": "failed",
+    }
+
+    assert _shape_web_extract_result(result, "auto") == result
+
+
+def _large_snapshot() -> str:
+    lines = ["heading"]
+    lines.extend(f"static text line {i}" for i in range(1200))
+    lines.append('button "Buy now" [ref=e12]')
+    lines.append("dialog Verification required")
+    lines.append("link Continue @e34")
+    lines.extend(f"footer text line {i}" for i in range(100))
+    return "\n".join(lines)
+
+
+def test_browser_snapshot_large_default_preserves_refs_and_actions():
+    snapshot = _large_snapshot()
+
+    shaped = browser_tool.shape_browser_snapshot(snapshot, result_mode="auto")
+
+    assert len(shaped) < len(snapshot)
+    assert "[SNAPSHOT COMPACTED:" in shaped
+    assert "[ref=e12]" in shaped
+    assert "@e34" in shaped
+    assert "Verification required" in shaped
+    assert "result_mode='full'" in shaped
+
+
+def test_browser_snapshot_full_and_env_optout_preserve_exact(monkeypatch):
+    snapshot = _large_snapshot()
+
+    assert browser_tool.shape_browser_snapshot(snapshot, result_mode="full") == snapshot
+
+    monkeypatch.setenv("HERMES_DISABLE_RESULT_COMPACTION", "true")
+    assert browser_tool.shape_browser_snapshot(snapshot, result_mode="preview") == snapshot
+
+
+def test_browser_snapshot_tool_preserves_element_count(monkeypatch):
+    snapshot = _large_snapshot()
+
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+    monkeypatch.setattr(browser_tool, "_last_session_key", lambda task_id: task_id)
+    monkeypatch.setattr(
+        browser_tool,
+        "_run_browser_command",
+        lambda *args, **kwargs: {
+            "success": True,
+            "data": {"snapshot": snapshot, "refs": {"e12": {}, "e34": {}}},
+        },
+    )
+
+    result = json.loads(browser_tool.browser_snapshot(task_id="shape-test"))
+
+    assert result["success"] is True
+    assert result["element_count"] == 2
+    assert "[SNAPSHOT COMPACTED:" in result["snapshot"]
+    assert "[ref=e12]" in result["snapshot"]
+    assert "@e34" in result["snapshot"]
+
+
+def test_browser_navigate_auto_snapshot_uses_result_mode(monkeypatch):
+    snapshot = _large_snapshot()
+    calls = []
+
+    def fake_run_browser_command(task_id, command, args=None, timeout=None):
+        calls.append((command, args))
+        if command == "open":
+            return {
+                "success": True,
+                "data": {"url": "https://example.com", "title": "Example"},
+            }
+        if command == "snapshot":
+            return {
+                "success": True,
+                "data": {"snapshot": snapshot, "refs": {"e12": {}, "e34": {}}},
+            }
+        raise AssertionError(command)
+
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+    monkeypatch.setattr(browser_tool, "_is_local_backend", lambda: True)
+    monkeypatch.setattr(browser_tool, "_is_always_blocked_url", lambda url: False)
+    monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: True)
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+    monkeypatch.setattr(browser_tool, "_navigation_session_key", lambda task_id, url: task_id)
+    monkeypatch.setattr(browser_tool, "_is_local_sidecar_key", lambda key: False)
+    monkeypatch.setattr(browser_tool, "_get_session_info", lambda task_id: {"_first_nav": False})
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run_browser_command)
+
+    result = json.loads(
+        browser_tool.browser_navigate(
+            "https://example.com",
+            task_id="shape-nav",
+            result_mode="preview",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["url"] == "https://example.com"
+    assert result["title"] == "Example"
+    assert result["element_count"] == 2
+    assert "[SNAPSHOT COMPACTED:" in result["snapshot"]
+    assert "[ref=e12]" in result["snapshot"]
+    assert "@e34" in result["snapshot"]
+    assert ("snapshot", ["-c"]) in calls

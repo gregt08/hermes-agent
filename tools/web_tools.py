@@ -47,6 +47,7 @@ import re
 import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
+from tools.result_shaping import compact_text_output, normalize_result_mode
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
 # plugins.web.firecrawl.provider. We re-export the names that external
@@ -849,12 +850,34 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return tool_error(error_msg)
 
 
+def _shape_web_extract_result(result: Dict[str, Any], result_mode: str = "auto") -> Dict[str, Any]:
+    """Compact only extracted page text while preserving per-URL metadata."""
+    content = result.get("content")
+    if not isinstance(content, str) or result.get("error"):
+        return result
+
+    compacted = compact_text_output(
+        content,
+        result_mode=result_mode,
+        field_name="content",
+        hint="Use result_mode='full' to return complete extracted content.",
+    )
+    if not compacted.metadata:
+        return result
+
+    shaped = dict(result)
+    shaped["content"] = compacted.text
+    shaped.update(compacted.metadata)
+    return shaped
+
+
 async def web_extract_tool(
     urls: List[str],
     format: str = None,
     use_llm_processing: bool = True,
     model: Optional[str] = None,
-    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION
+    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION,
+    result_mode: str = "auto",
 ) -> str:
     """
     Extract content from specific web pages using available extraction API backend.
@@ -868,6 +891,7 @@ async def web_extract_tool(
         use_llm_processing (bool): Whether to process content with LLM for summarization (default: True)
         model (Optional[str]): The model to use for LLM processing (defaults to current auxiliary backend model)
         min_length (int): Minimum content length to trigger LLM processing (default: 5000)
+        result_mode (str): Output mode: "auto", "preview", or "full"
 
     Security: URLs are checked for embedded secrets before fetching.
     
@@ -878,6 +902,8 @@ async def web_extract_tool(
     Raises:
         Exception: If extraction fails or API key is not set
     """
+    result_mode = normalize_result_mode(result_mode)
+
     # Block URLs containing embedded secrets (exfiltration prevention).
     # URL-decode first so percent-encoded secrets (%73k- = sk-) are caught.
     from agent.redact import _PREFIX_RE
@@ -896,7 +922,8 @@ async def web_extract_tool(
             "format": format,
             "use_llm_processing": use_llm_processing,
             "model": model,
-            "min_length": min_length
+            "min_length": min_length,
+            "result_mode": result_mode,
         },
         "error": None,
         "pages_extracted": 0,
@@ -1089,13 +1116,13 @@ async def web_extract_tool(
         
         # Trim output to minimal fields per entry: title, content, error
         trimmed_results = [
-            {
+            _shape_web_extract_result({
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
-            }
+            }, result_mode)
             for r in response.get("results", [])
         ]
         trimmed_response = {"results": trimmed_results}
@@ -1531,6 +1558,12 @@ WEB_EXTRACT_SCHEMA = {
                 "items": {"type": "string"},
                 "description": "List of URLs to extract content from (max 5 URLs per call)",
                 "maxItems": 5
+            },
+            "result_mode": {
+                "type": "string",
+                "enum": ["auto", "full", "preview"],
+                "description": "Controls result shaping. auto compacts only large extracted content, preview forces a compact preview when possible, full bypasses compaction.",
+                "default": "auto"
             }
         },
         "required": ["urls"]
@@ -1552,7 +1585,10 @@ registry.register(
     toolset="web",
     schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
+        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [],
+        "markdown",
+        result_mode=args.get("result_mode", "auto"),
+    ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     is_async=True,
