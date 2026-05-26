@@ -69,6 +69,7 @@ from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
+from tools.result_shaping import normalize_result_mode, result_compaction_disabled
 
 try:
     from tools.website_policy import check_website_access
@@ -1478,6 +1479,12 @@ BROWSER_TOOL_SCHEMAS = [
                 "url": {
                     "type": "string",
                     "description": "The URL to navigate to (e.g., 'https://example.com')"
+                },
+                "result_mode": {
+                    "type": "string",
+                    "enum": ["auto", "full", "preview"],
+                    "description": "Controls shaping of the auto snapshot only. auto compacts large snapshots, preview forces a compact preview when possible, full bypasses snapshot compaction.",
+                    "default": "auto"
                 }
             },
             "required": ["url"]
@@ -1493,6 +1500,12 @@ BROWSER_TOOL_SCHEMAS = [
                     "type": "boolean",
                     "description": "If true, returns complete page content. If false (default), returns compact view with interactive elements only.",
                     "default": False
+                },
+                "result_mode": {
+                    "type": "string",
+                    "enum": ["auto", "full", "preview"],
+                    "description": "Controls post-processing. auto compacts large snapshots, preview forces a compact preview when possible, full bypasses compaction. full=true is equivalent to result_mode=full.",
+                    "default": "auto"
                 }
             },
             "required": []
@@ -2283,11 +2296,86 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
     return '\n'.join(result)
 
 
+_SNAPSHOT_REF_RE = re.compile(r"(?:@e\d+|\[ref=e\d+\])")
+_SNAPSHOT_ACTION_RE = re.compile(
+    r"\b(button|link|textbox|input|checkbox|radio|combobox|menuitem|dialog|"
+    r"alert|error|captcha|verify|sign in|login|submit|continue|next|search)\b",
+    re.IGNORECASE,
+)
+
+
+def shape_browser_snapshot(snapshot_text: str, result_mode: str = "auto", max_chars: int = 8000) -> str:
+    """Compact browser snapshots while keeping interactive refs actionable."""
+    result_mode = normalize_result_mode(result_mode)
+    if (
+        result_compaction_disabled()
+        or result_mode == "full"
+        or not isinstance(snapshot_text, str)
+    ):
+        return snapshot_text
+
+    should_compact = result_mode == "preview" or len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD
+    if not should_compact or len(snapshot_text) <= max_chars:
+        return snapshot_text
+
+    lines = snapshot_text.splitlines()
+    keep: dict[int, str] = {}
+
+    def add_line(idx: int) -> None:
+        if 0 <= idx < len(lines):
+            keep[idx] = lines[idx]
+
+    for idx in range(min(40, len(lines))):
+        add_line(idx)
+    for idx in range(max(0, len(lines) - 20), len(lines)):
+        add_line(idx)
+
+    for idx, line in enumerate(lines):
+        if _SNAPSHOT_REF_RE.search(line) or _SNAPSHOT_ACTION_RE.search(line):
+            add_line(idx)
+            add_line(idx - 1)
+            add_line(idx + 1)
+
+    ordered = sorted(keep)
+    budget = max(max_chars - 500, 1000)
+    selected: list[tuple[int, str]] = []
+    used = 0
+    for idx in ordered:
+        line = keep[idx]
+        line_cost = len(line) + 1
+        if used + line_cost > budget and selected:
+            continue
+        selected.append((idx, line))
+        used += line_cost
+
+    omitted_lines = max(len(lines) - len(selected), 0)
+    selected_text = "\n".join(line for _, line in selected)
+    omitted_chars = max(len(snapshot_text) - len(selected_text), 0)
+    marker = (
+        f"[SNAPSHOT COMPACTED: omitted {omitted_chars} chars / {omitted_lines} lines. "
+        "Use browser_snapshot(full=True) or result_mode='full' for complete content.]"
+    )
+
+    output: list[str] = []
+    previous_idx: Optional[int] = None
+    marker_added = False
+    for idx, line in selected:
+        if previous_idx is not None and idx > previous_idx + 1 and not marker_added:
+            output.append(marker)
+            marker_added = True
+        output.append(line)
+        previous_idx = idx
+
+    if not marker_added:
+        output.append(marker)
+    return "\n".join(output)
+
+
 # ============================================================================
 # Browser Tool Functions
 # ============================================================================
 
-def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+def browser_navigate(url: str, task_id: Optional[str] = None, result_mode: str = "auto") -> str:
     """
     Navigate to a URL in the browser.
 
@@ -2359,7 +2447,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_navigate
-        return camofox_navigate(url, task_id)
+        return camofox_navigate(url, task_id, result_mode=result_mode)
 
     if auto_local_this_nav:
         logger.info(
@@ -2470,8 +2558,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 snap_data = snap_result.get("data", {})
                 snapshot_text = snap_data.get("snapshot", "")
                 refs = snap_data.get("refs", {})
-                if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-                    snapshot_text = _truncate_snapshot(snapshot_text)
+                snapshot_text = shape_browser_snapshot(snapshot_text, result_mode=result_mode)
                 response["snapshot"] = snapshot_text
                 response["element_count"] = len(refs) if refs else 0
                 if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
@@ -2490,7 +2577,8 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 def browser_snapshot(
     full: bool = False,
     task_id: Optional[str] = None,
-    user_task: Optional[str] = None
+    user_task: Optional[str] = None,
+    result_mode: str = "auto",
 ) -> str:
     """
     Get a text-based snapshot of the current page's accessibility tree.
@@ -2503,9 +2591,10 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    effective_result_mode = "full" if full else normalize_result_mode(result_mode)
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
-        return camofox_snapshot(full, task_id, user_task)
+        return camofox_snapshot(full, task_id, user_task, result_mode=effective_result_mode)
 
     effective_task_id = _last_session_key(task_id or "default")
 
@@ -2521,11 +2610,7 @@ def browser_snapshot(
         snapshot_text = data.get("snapshot", "")
         refs = data.get("refs", {})
 
-        # Check if snapshot needs summarization
-        if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
-            snapshot_text = _extract_relevant_content(snapshot_text, user_task)
-        elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-            snapshot_text = _truncate_snapshot(snapshot_text)
+        snapshot_text = shape_browser_snapshot(snapshot_text, result_mode=effective_result_mode)
 
         response = {
             "success": True,
@@ -3737,7 +3822,11 @@ registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_navigate(
+        url=args.get("url", ""),
+        task_id=kw.get("task_id"),
+        result_mode=args.get("result_mode", "auto"),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
 )
@@ -3746,7 +3835,11 @@ registry.register(
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_snapshot"],
     handler=lambda args, **kw: browser_snapshot(
-        full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
+        full=args.get("full", False),
+        task_id=kw.get("task_id"),
+        user_task=kw.get("user_task"),
+        result_mode=args.get("result_mode", "auto"),
+    ),
     check_fn=check_browser_requirements,
     emoji="📸",
 )
