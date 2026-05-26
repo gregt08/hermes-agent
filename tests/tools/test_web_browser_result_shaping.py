@@ -68,6 +68,71 @@ def test_web_extract_preserves_relevant_middle_snippets():
     assert shaped["content_relevance_snippets"] >= 1
 
 
+def test_web_extract_does_not_preserve_standalone_sensitive_terms():
+    content = (
+        "HEAD\n"
+        + ("ordinary content\n" * 1800)
+        + "Glossary words only: password token credential placeholders.\n"
+        + ("ordinary tail content\n" * 1800)
+        + "TAIL"
+    )
+    result = {
+        "url": "https://example.com/glossary",
+        "title": "Glossary",
+        "content": content,
+        "error": None,
+    }
+
+    shaped = _shape_web_extract_result(result, "auto")
+
+    assert shaped["compacted"] is True
+    assert "Glossary words only" not in shaped["content"]
+    assert "content_relevance_snippets" not in shaped
+
+
+def test_web_extract_does_not_boost_contextual_sensitive_terms():
+    content = (
+        "HEAD\n"
+        + ("ordinary content\n" * 1800)
+        + "Authentication error: password reset token is required before submit.\n"
+        + ("ordinary tail content\n" * 1800)
+        + "TAIL"
+    )
+    result = {
+        "url": "https://example.com/auth",
+        "title": "Auth",
+        "content": content,
+        "error": None,
+    }
+
+    shaped = _shape_web_extract_result(result, "auto")
+
+    assert shaped["compacted"] is True
+    assert "Authentication error: password reset token" not in shaped["content"]
+
+
+def test_compaction_relevance_budget_accounts_for_snippet_wrapper():
+    content = (
+        "HEAD\n"
+        + ("ordinary content\n" * 500)
+        + "Security verification failed: CAPTCHA required before continue.\n"
+        + ("ordinary tail content\n" * 500)
+        + "TAIL"
+    )
+    result = {
+        "url": "https://example.com/security-small-preview",
+        "title": "Security",
+        "content": content,
+        "error": None,
+    }
+
+    shaped = _shape_web_extract_result(result, "preview")
+
+    assert shaped["compacted"] is True
+    assert "[RELEVANT OMITTED SNIPPETS]" in shaped["content"]
+    assert shaped["content_preview_chars"] == len(shaped["content"])
+
+
 def test_web_extract_full_and_env_optout_preserve_content(monkeypatch):
     content = "HEAD\n" + ("middle\n" * 4000) + "TAIL"
     result = {
